@@ -1,0 +1,327 @@
+name: Free unsigned iPhone package candidate
+
+# Manual package build: no Apple credentials, signing, installation, or pump use.
+# Verified GitHub Free storage headroom and existing $0 stop-usage budget.
+'on':
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: free-device-install-candidate
+  cancel-in-progress: false
+
+jobs:
+  package:
+    if: ${{ github.event_name == 'workflow_dispatch' && github.event.repository.visibility == 'public' && toJSON(github.event.repository.private) == 'false' }}
+    runs-on: macos-26
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
+    env:
+      DEVELOPER_DIR: /Applications/Xcode_26.5.app/Contents/Developer
+      UPSTREAM_REVISION: abfa1cd21a431372f6a890b11662acee90a2ea03
+      BUILD_BASE_IDENTIFIER: org.h00l1gvn.loop
+
+    steps:
+      - name: Require a public repository and the pinned Xcode version
+        run: |
+          python3 - <<'PY'
+          import json, os
+          with open(os.environ['GITHUB_EVENT_PATH']) as stream:
+              repository = json.load(stream).get('repository', {})
+          if repository.get('private') is not False or repository.get('visibility') != 'public':
+              raise SystemExit('Refusing to run outside a public repository.')
+          PY
+          if [ ! -d "$DEVELOPER_DIR" ]; then
+            printf '::error::Required Xcode 26.5 is unavailable. No fallback version will be selected.\n'
+            exit 1
+          fi
+          xcodebuild -version
+          xcodebuild -showsdks
+
+      - name: Fetch pinned upstream source and pinned submodules
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          repository: LoopKit/LoopWorkspace
+          ref: abfa1cd21a431372f6a890b11662acee90a2ea03
+          path: source
+          fetch-depth: 1
+          submodules: recursive
+          persist-credentials: false
+
+      - name: Verify and record source revisions
+        working-directory: source
+        run: |
+          test "$(git rev-parse HEAD)" = "$UPSTREAM_REVISION"
+          test "$(git -C Loop rev-parse HEAD)" = 728a14123d34a99dc508e1b500b55557ccb1ae47
+          test "$(git -C LoopKit rev-parse HEAD)" = a5beee96d8e0770fc6999372a73ea5f523351a43
+          test "$(git -C OmnipodKit rev-parse HEAD)" = ccd44384e44f6ed11052043f0c9dfbc4465e00ad
+          test -z "$(git status --porcelain)"
+          git submodule foreach --recursive 'test "$(git rev-parse HEAD)" = "$sha1" && test -z "$(git status --porcelain)"'
+          git submodule status --recursive | tee "$RUNNER_TEMP/Loop-submodule-revisions.txt"
+
+      - name: Apply only the documented free-account compatibility changes
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib
+          from pathlib import Path
+          # https://loopkit.github.io/loopdocs/build/build-free-loop/
+          main_path = Path('Loop/Loop/Loop.entitlements')
+          watch_path = Path('Loop/WatchApp Extension/WatchApp Extension.entitlements')
+          override_path = Path('LoopConfigOverride.xcconfig')
+          main_before = plistlib.loads(main_path.read_bytes())
+          watch_before = plistlib.loads(watch_path.read_bytes())
+          expected_main = {
+              'aps-environment': 'development',
+              'com.apple.developer.healthkit': True,
+              'com.apple.developer.healthkit.access': [],
+              'com.apple.developer.healthkit.background-delivery': True,
+              'com.apple.developer.nfc.readersession.formats': ['TAG'],
+              'com.apple.developer.siri': True,
+              'com.apple.developer.usernotifications.time-sensitive': True,
+              'com.apple.security.application-groups': ['$(APP_GROUP_IDENTIFIER)'],
+          }
+          expected_watch = {
+              'com.apple.developer.healthkit': True,
+              'com.apple.developer.healthkit.access': [],
+              'com.apple.developer.siri': True,
+          }
+          if main_before != expected_main or watch_before != expected_watch:
+              raise SystemExit('Pinned entitlement inputs differ from the reviewed source.')
+          original = override_path.read_text()
+          existing_flags = 'SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) EXPERIMENTAL_FEATURES_ENABLED SIMULATORS_ENABLED ALLOW_ALGORITHM_EXPERIMENTS DEBUG_FEATURES_ENABLED'
+          if original.splitlines().count(existing_flags) != 1 or 'SIRI_DISABLED' in original:
+              raise SystemExit('Pinned compilation-condition input differs from the reviewed source.')
+          main_after = dict(main_before)
+          for key in ('aps-environment', 'com.apple.developer.nfc.readersession.formats',
+                      'com.apple.developer.siri', 'com.apple.developer.usernotifications.time-sensitive'):
+              del main_after[key]
+          watch_after = dict(watch_before)
+          del watch_after['com.apple.developer.siri']
+          watch_after['com.apple.developer.healthkit.background-delivery'] = True
+          for path, content in ((main_path, main_after), (watch_path, watch_after)):
+              path.write_bytes(plistlib.dumps(content, sort_keys=False))
+          override_path.write_text(original.replace(existing_flags, existing_flags + ' SIRI_DISABLED'))
+          report = {
+              'reference': 'https://loopkit.github.io/loopdocs/build/build-free-loop/',
+              'compilation_conditions_before': existing_flags,
+              'compilation_conditions_after': existing_flags + ' SIRI_DISABLED',
+              'main_entitlements_before': main_before,
+              'main_entitlements_after': main_after,
+              'watch_entitlements_before': watch_before,
+              'watch_entitlements_after': watch_after,
+              'modified_files': {str(path): hashlib.sha256(path.read_bytes()).hexdigest()
+                                 for path in (main_path, watch_path, override_path)},
+          }
+          (Path(os.environ['RUNNER_TEMP']) / 'Loop-free-compatibility.json').write_text(json.dumps(report, indent=2))
+          print('Applied only the reviewed entitlement changes and appended SIRI_DISABLED; all existing flags retained.')
+          PY
+          python3 - <<'PY'
+          import subprocess
+          workspace = set(subprocess.check_output(['git', 'diff', '--name-only'], text=True).splitlines())
+          loop = set(subprocess.check_output(['git', '-C', 'Loop', 'diff', '--name-only'], text=True).splitlines())
+          if workspace != {'Loop', 'LoopConfigOverride.xcconfig'}:
+              raise SystemExit('Unexpected workspace changes.')
+          if loop != {'Loop/Loop.entitlements', 'WatchApp Extension/WatchApp Extension.entitlements'}:
+              raise SystemExit('Unexpected Loop source changes.')
+          PY
+
+      - name: Compile an unsigned generic iPhone archive
+        id: compile
+        working-directory: source
+        run: |
+          archive_path="$RUNNER_TEMP/Loop-unsigned.xcarchive"
+          set +e
+          xcodebuild archive \
+            -workspace LoopWorkspace.xcworkspace \
+            -scheme LoopWorkspace \
+            -configuration Release \
+            -destination 'generic/platform=iOS' \
+            -archivePath "$archive_path" \
+            -derivedDataPath "$RUNNER_TEMP/Loop-derived-data" \
+            -clonedSourcePackagesDirPath "$RUNNER_TEMP/Loop-source-packages" \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY= \
+            EXPANDED_CODE_SIGN_IDENTITY= \
+            EXPANDED_CODE_SIGN_IDENTITY_NAME= \
+            CODE_SIGN_STYLE=Manual \
+            DEVELOPMENT_TEAM= \
+            LOOP_DEVELOPMENT_TEAM= \
+            PROVISIONING_PROFILE= \
+            PROVISIONING_PROFILE_SPECIFIER= \
+            MAIN_APP_BUNDLE_IDENTIFIER="$BUILD_BASE_IDENTIFIER" \
+            2>&1 | tee "$RUNNER_TEMP/Loop-unsigned-build.log"
+          compiler_status=${PIPESTATUS[0]}
+          set -e
+          printf 'exit_code=%s\n' "$compiler_status" >> "$GITHUB_OUTPUT"
+          if [ "$compiler_status" -ne 0 ]; then
+            exit "$compiler_status"
+          fi
+          app_path="$archive_path/Products/Applications/Loop.app"
+          test -d "$app_path"
+          executable_name=$(/usr/libexec/PlistBuddy -c 'Print :CFBundleExecutable' "$app_path/Info.plist")
+          test -s "$app_path/$executable_name"
+          file "$app_path/$executable_name"
+          if codesign --display "$app_path" 2> "$RUNNER_TEMP/Loop-signature-check.log"; then
+            printf '::error::The main app unexpectedly has a signature.\n'
+            exit 1
+          fi
+          cat "$RUNNER_TEMP/Loop-signature-check.log"
+
+      - name: Package only Payload/Loop.app and an identifier manifest
+        id: package
+        working-directory: source
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, plistlib, subprocess, zipfile
+          from pathlib import Path
+          temp = Path(os.environ['RUNNER_TEMP'])
+          app = temp / 'Loop-unsigned.xcarchive/Products/Applications/Loop.app'
+          staging = temp / 'Loop-ipa-staging'
+          output = temp / 'Loop-package-output'
+          (staging / 'Payload').mkdir(parents=True)
+          output.mkdir()
+          if any(app.rglob('embedded.mobileprovision')):
+              raise SystemExit('Unexpected provisioning profile in unsigned app.')
+          subprocess.run(['/usr/bin/ditto', '--norsrc', '--noextattr', str(app), str(staging / 'Payload/Loop.app')], check=True)
+          packaged_app = staging / 'Payload/Loop.app'
+          base = os.environ['BUILD_BASE_IDENTIFIER']
+          group = 'group.' + base + 'Group'
+          identifier_keys = {
+              'CFBundleIdentifier', 'CFBundleURLName', 'AppGroupIdentifier',
+              'MainAppBundleIdentifier', 'WKCompanionAppBundleIdentifier', 'WKAppBundleIdentifier',
+              'application-identifier', 'com.apple.application-identifier',
+              'com.apple.security.application-groups', 'com.apple.developer.team-identifier',
+              'keychain-access-groups',
+          }
+          entries, bundle_infos, unparsed_plists, binary_matches = [], [], [], []
+          def walk(value, keys, selected=False):
+              found = []
+              if isinstance(value, dict):
+                  for key, child in value.items():
+                      found.extend(walk(child, keys + [key], key in identifier_keys))
+              elif isinstance(value, list):
+                  for index, child in enumerate(value):
+                      found.extend(walk(child, keys + [index], selected))
+              elif selected or (isinstance(value, str) and base in value):
+                  found.append({'key_path': keys, 'value': value})
+              return found
+          macho_magic = {b'\xfe\xed\xfa\xce', b'\xce\xfa\xed\xfe', b'\xfe\xed\xfa\xcf', b'\xcf\xfa\xed\xfe', b'\xca\xfe\xba\xbe', b'\xbe\xba\xfe\xca', b'\xca\xfe\xba\xbf', b'\xbf\xba\xfe\xca'}
+          for path in sorted(packaged_app.rglob('*')):
+              if not path.is_file() or path.is_symlink():
+                  continue
+              relative = str(path.relative_to(staging))
+              if path.suffix in ('.plist', '.strings', '.xcprivacy'):
+                  try:
+                      content = plistlib.loads(path.read_bytes())
+                  except (plistlib.InvalidFileException, ValueError, TypeError):
+                      unparsed_plists.append(relative)
+                  else:
+                      for entry in walk(content, []):
+                          entries.append({'path': relative, **entry})
+                      if path.name == 'Info.plist' and isinstance(content, dict):
+                          bundle_infos.append({'path': relative, 'bundle_identifier': content.get('CFBundleIdentifier')})
+              with path.open('rb') as stream:
+                  magic = stream.read(4)
+                  if magic in macho_magic:
+                      content = magic + stream.read()
+                      counts = {'base_identifier': content.count(base.encode()), 'app_group_identifier': content.count(group.encode())}
+                      if any(counts.values()):
+                          binary_matches.append({'path': relative, 'occurrences': counts})
+          source_entitlements = {
+              base: 'Loop/Loop/Loop.entitlements',
+              base + '.statuswidget': 'Loop/Loop Status Extension/Loop Status Extension.entitlements',
+              base + '.Loop-Intent-Extension': 'Loop/Loop Intent Extension/Loop Intent Extension.entitlements',
+              base + '.LoopWidgetExtension': 'Loop/Loop Widget Extension/Bootstrap/LoopWidgetExtension.entitlements',
+              base + '.LoopWatch': None,
+              base + '.LoopWatch.watchkitextension': 'Loop/WatchApp Extension/WatchApp Extension.entitlements',
+          }
+          actual_identifiers = {item['bundle_identifier'] for item in bundle_infos}
+          if not set(source_entitlements).issubset(actual_identifiers):
+              raise SystemExit('Archive is missing one or more expected app/extension bundle identifiers.')
+          def resolve(value):
+              if isinstance(value, dict):
+                  return {key: resolve(child) for key, child in value.items()}
+              if isinstance(value, list):
+                  return [resolve(child) for child in value]
+              return value.replace('$(APP_GROUP_IDENTIFIER)', group) if isinstance(value, str) else value
+          signing_targets = []
+          for identifier, path in source_entitlements.items():
+              entitlements = plistlib.loads(Path(path).read_bytes()) if path else {}
+              signing_targets.append({'bundle_identifier': identifier, 'source_entitlements': path,
+                                      'requested_entitlements': resolve(entitlements)})
+          ipa = output / 'Loop-unsigned.ipa'
+          subprocess.run(['/usr/bin/ditto', '-c', '-k', '--keepParent', '--norsrc', '--noextattr', str(staging / 'Payload'), str(ipa)], check=True)
+          with zipfile.ZipFile(ipa) as archive:
+              for item in archive.infolist():
+                  if item.filename not in ('Payload/', 'Payload/Loop.app/') and not item.filename.startswith('Payload/Loop.app/'):
+                      raise SystemExit('Unexpected content outside Payload/Loop.app.')
+          manifest = {
+              'schema_version': 1,
+              'unsigned': True,
+              'workspace_revision': os.environ['UPSTREAM_REVISION'],
+              'submodule_revisions': (temp / 'Loop-submodule-revisions.txt').read_text().splitlines(),
+              'xcode_version': subprocess.check_output(['xcodebuild', '-version'], text=True).strip(),
+              'build_base_identifier': base,
+              'build_app_group_identifier': group,
+              'compatibility_changes': json.loads((temp / 'Loop-free-compatibility.json').read_text()),
+              'plist_identifier_entries': entries,
+              'bundle_info_plists': bundle_infos,
+              'unparsed_property_list_candidates': unparsed_plists,
+              'signing_targets': signing_targets,
+              'macho_build_identifier_matches': binary_matches,
+              'ipa': {'name': ipa.name, 'bytes': ipa.stat().st_size, 'sha256': hashlib.sha256(ipa.read_bytes()).hexdigest()},
+              'local_signing_review_required': True,
+              'identifier_change_requires_new_build': True,
+              'notes': [
+                  'These are the intended stable final identifiers; do not rename the app or shared group during signing.',
+                  'Match every app-group entitlement and Info.plist AppGroupIdentifier to the provisioned group.',
+                  'Preserve unrelated fixed com.loopkit namespaces; do not globally replace identifier-like strings.',
+                  'If identifier availability requires a change, rebuild with the new base instead of rewriting compiled identifier strings.',
+                  'An empty Mach-O string scan does not validate generated App Intents or other metadata.',
+                  'Apple provisioning must supply its actual team/application/keychain identifiers; this manifest does not invent them.',
+              ],
+          }
+          manifest_path = output / 'manifest.json'
+          manifest_path.write_text(json.dumps(manifest, indent=2) + '\n')
+          total = ipa.stat().st_size + manifest_path.stat().st_size
+          # Reserve 64 KiB for the artifact ZIP wrapper inside the 300 MiB cap.
+          if total > 300 * 1024 * 1024 - 65536:
+              raise SystemExit('Package plus manifest exceeds the 300 MiB artifact cap.')
+          if set(path.name for path in output.iterdir()) != {'Loop-unsigned.ipa', 'manifest.json'}:
+              raise SystemExit('Unexpected artifact output files.')
+          print(json.dumps({'package_status': 'created', 'artifact_payload_bytes': total, 'macho_files_with_build_identifier_matches': len(binary_matches)}))
+          PY
+
+      - name: Upload one unsigned package artifact for one day
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Loop-unsigned-install-candidate
+          path: |
+            ${{ runner.temp }}/Loop-package-output/Loop-unsigned.ipa
+            ${{ runner.temp }}/Loop-package-output/manifest.json
+          if-no-files-found: error
+          retention-days: 1
+          compression-level: 0
+          overwrite: false
+          include-hidden-files: false
+
+      - name: Record the bounded candidate result
+        if: ${{ always() }}
+        env:
+          COMPILE_OUTCOME: ${{ steps.compile.outcome }}
+          COMPILER_EXIT_CODE: ${{ steps.compile.outputs.exit_code }}
+          PACKAGE_OUTCOME: ${{ steps.package.outcome }}
+        run: |
+          {
+            printf 'Compile: **%s**; compiler exit code: `%s`.\n\n' "$COMPILE_OUTCOME" "${COMPILER_EXIT_CODE:-not available}"
+            printf 'Package: **%s**.\n\n' "$PACKAGE_OUTCOME"
+            printf 'Only an unsigned IPA and identifier manifest are eligible for upload, in one artifact retained for one day, capped below 300 MiB.\n\n'
+            printf 'No source checkout, xcarchive, dSYM, signing material, cache, or build log is uploaded. No Apple account, installation, or pump actions occur.\n\n'
+            printf 'Local identifier/provisioning review remains required. A package does not establish launch or runtime reliability.\n'
+          } >> "$GITHUB_STEP_SUMMARY"
