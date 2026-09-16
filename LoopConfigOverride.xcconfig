@@ -1,7 +1,9 @@
 #include? "../../LoopConfigOverride.xcconfig"
 
 // Override this if you don't want the default com.${DEVELOPMENT_TEAM}.loopkit that loop uses
-// MAIN_APP_BUNDLE_IDENTIFIER = com.myname.loop
+// Preserve the already-installed app and its shared configuration.
+MAIN_APP_BUNDLE_IDENTIFIER = org.h00l1gvn.loop
+APP_GROUP_IDENTIFIER = group.org.h00l1gvn.loopGroup
 
 // Customize this to change the app name displayed
 //MAIN_APP_DISPLAY_NAME = Loop
@@ -10,7 +12,7 @@
 //URL_SCHEME_NAME = $(MAIN_APP_DISPLAY_NAME)
 
 // Features
-SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) EXPERIMENTAL_FEATURES_ENABLED SIMULATORS_ENABLED ALLOW_ALGORITHM_EXPERIMENTS DEBUG_FEATURES_ENABLED
+SWIFT_ACTIVE_COMPILATION_CONDITIONS = $(inherited) EXPERIMENTAL_FEATURES_ENABLED SIMULATORS_ENABLED ALLOW_ALGORITHM_EXPERIMENTS DEBUG_FEATURES_ENABLED SIRI_DISABLED
 
 // Put your team id here for signing
 //LOOP_DEVELOPMENT_TEAM = UY678SP37Q
