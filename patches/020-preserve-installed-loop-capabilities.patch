@@ -1,12 +1,14 @@
 diff --git a/Loop/Loop/Loop.entitlements b/Loop/Loop/Loop.entitlements
 --- a/Loop/Loop/Loop.entitlements
 +++ b/Loop/Loop/Loop.entitlements
-@@ -2,21 +2,11 @@
+@@ -2,21 +2,13 @@
  <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
  <plist version="1.0">
  <dict>
 -	<key>aps-environment</key>
 -	<string>development</string>
++	<key>aps-environment</key>
++	<string>development</string>
  	<key>com.apple.developer.healthkit</key>
  	<true/>
  	<key>com.apple.developer.healthkit.access</key>
